@@ -1,104 +1,96 @@
-import { v4 as uuid4 } from 'uuid';
-import RedisClient from '../utils/redis';
-import DBClient from '../utils/db';
+import mongo from 'mongodb';
+import { tmpdir } from 'os';
+import { promisify } from 'util';
+import Queue from 'bull/lib/queue';
+import { v4 } from 'uuid';
+import { mkdir, writeFile, stat, existsSync, realpath } from 'fs';
+import { join as joinPath } from 'path';
+import { contentType } from 'mime-types';
 
-const { ObjectId } = require('mongodb');
-const fs = require('fs');
-const mime = require('mime-types');
-const Bull = require('bull');
+import dbClient from '../utils/db';
+import { getUserByToken, validateId } from '../utils/auth';
+
+const fileQueue = new Queue('thumbnail generation');
+const mkDirAsync = promisify(mkdir);
+const writeFileAsync = promisify(writeFile);
+const statAsync = promisify(stat);
+const realpathAsync = promisify(realpath);
+const FILE_TYPES = {
+  folder: 'folder',
+  file: 'file',
+  image: 'image',
+};
 
 export default class FilesController {
   static async postUpload(req, res) {
-    const fileQueue = new Bull('fileQueue');
+    const fetchedUser = await getUserByToken(req);
 
-    const token = req.header('X-Token') || null;
-    if (!token) return res.status(401).send({ error: 'Unauthorized' });
+    if (!fetchedUser) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    const { name } = req.body;
 
-    const redisToken = await RedisClient.get(`auth_${token}`);
-    if (!redisToken) return res.status(401).send({ error: 'Unauthorized' });
+    if (!name) {
+      return res.status(400).json({ error: 'Missing name' });
+    }
+    const { type } = req.body;
 
-    const user = await DBClient.db
-      .collection('users')
-      .findOne({ _id: ObjectId(redisToken) });
-    if (!user) return res.status(401).send({ error: 'Unauthorized' });
+    if (!type || !Object.values(FILE_TYPES).includes(type)) {
+      return res.status(400).json({ error: 'Missing type' });
+    }
+    const parentId = req.body.parentId || 0;
+    const isPublic = req.body.isPublic || false;
+    const { data } = req.body;
 
-    const fileName = req.body.name;
-    if (!fileName) return res.status(400).send({ error: 'Missing name' });
-
-    const fileType = req.body.type;
-    if (!fileType || !['folder', 'file', 'image'].includes(fileType))
-      return res.status(400).send({ error: 'Missing type' });
-
-    const fileData = req.body.data;
-    if (!fileData && ['file', 'image'].includes(fileType))
-      return res.status(400).send({ error: 'Missing data' });
-
-    const fileIsPublic = req.body.isPublic || false;
-
-    let fileParentId = req.body.parentId || 0;
-    fileParentId = fileParentId === '0' ? 0 : fileParentId;
-
-    if (fileParentId !== 0) {
-      const parentFile = await DBClient.db
-        .collection('files')
-        .findOne({ _id: ObjectId(fileParentId) });
-      if (!parentFile)
-        return res.status(400).send({ error: 'Parent not found' });
-      if (parentFile.type !== 'folder')
-        return res.status(400).send({ error: 'Parent is not a folder' });
+    if (!req.body.data && type !== FILE_TYPES.folder) {
+      return res.status(400).json({ error: 'Missing data' });
     }
 
-    const fileDataDb = {
-      userId: user._id,
-      name: fileName,
-      type: fileType,
-      isPublic: fileIsPublic,
-      parentId: fileParentId,
+    if (parentId !== 0 && parentId !== '0') {
+      const file = await dbClient.getFileById(parentId);
+
+      if (!file) {
+        return res.status(400).json({ error: 'Parent not found' });
+      }
+      if (file.type !== FILE_TYPES.folder) {
+        return res.status(400).json({ error: 'Parent is not a folder' });
+      }
+    }
+    const userId = fetchedUser._id.toString();
+    const baseDir =
+      `${process.env.FOLDER_PATH || ''}`.trim().length > 0
+        ? process.env.FOLDER_PATH.trim()
+        : joinPath(tmpdir(), 'files_manager');
+    const newFile = {
+      userId: new mongo.ObjectID(userId),
+      name,
+      type,
+      isPublic,
+      parentId:
+        parentId === 0 || parentId === '0' ? '0' : new mongo.ObjectID(parentId),
     };
+    await mkDirAsync(baseDir, { recursive: true });
 
-    if (fileDataDb.type === 'folder') {
-      await DBClient.db.collection('files').insertOne(fileDataDb);
-      return res.status(201).send({
-        id: fileDataDb._id,
-        userId: fileDataDb.userId,
-        name: fileDataDb.name,
-        type: fileDataDb.type,
-        isPublic: fileDataDb.isPublic,
-        parentId: fileDataDb.parentId,
-      });
+    if (type !== FILE_TYPES.folder) {
+      const localPath = joinPath(baseDir, v4());
+      await writeFileAsync(localPath, Buffer.from(data, 'base64'));
+      newFile.localPath = localPath;
     }
+    const insertedFile = await dbClient.createFile(newFile);
+    const fileId = insertedFile.insertedId.toString();
 
-    const pathDir = process.env.FOLDER_PATH || '/tmp/files_manager';
-    const fileUuid = uuid4();
-
-    const buff = Buffer.from(fileData, 'base64');
-    const pathFile = `${pathDir}/${fileUuid}`;
-
-    fs.mkdir(pathDir, { recursive: true }, (error) => {
-      if (error) return res.status(400).send({ error: error.message });
-      return true;
-    });
-
-    fs.writeFile(pathFile, buff, (error) => {
-      if (error) return res.status(400).send({ error: error.message });
-      return true;
-    });
-
-    fileDataDb.localPath = pathFile;
-    await DBClient.db.collection('files').insertOne(fileDataDb);
-
-    fileQueue.add({
-      userId: fileDataDb.userId,
-      fileId: fileDataDb._id,
-    });
-
-    return res.status(201).send({
-      id: fileDataDb._id,
-      userId: fileDataDb.userId,
-      name: fileDataDb.name,
-      type: fileDataDb.type,
-      isPublic: fileDataDb.isPublic,
-      parentId: fileDataDb.parentId,
+    if (type === FILE_TYPES.image) {
+      const jobName = `Image thumbnail [${userId}-${fileId}]`;
+      fileQueue.add({ userId, fileId, name: jobName });
+    }
+    return res.status(201).json({
+      id: fileId,
+      userId,
+      name,
+      type,
+      isPublic,
+      parentId:
+        parentId === 0 || parentId === '0' ? '0' : new mongo.ObjectID(parentId),
     });
   }
 
