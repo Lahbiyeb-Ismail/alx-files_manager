@@ -1,58 +1,62 @@
-/* eslint-disable */
 import sha1 from 'sha1';
-import DBClient from '../utils/db';
-import RedisClient from '../utils/redis';
+import { ObjectID } from 'mongodb';
+//import Queue from 'bull';
+import dbClient from '../utils/db';
+import redisClient from '../utils/redis';
 
-const { ObjectId } = require('mongodb');
-
-const Bull = require('bull');
+//const userQueue = new Queue('userQueue', 'redis://127.0.0.1:6379');
 
 class UsersController {
-  static async postNew(request, response) {
-    const userQueue = new Bull('userQueue');
+  static postNew(request, response) {
+    const { email } = request.body;
+    const { password } = request.body;
 
-    const userEmail = request.body.email;
-    if (!userEmail)
-      return response.status(400).send({ error: 'Missing email' });
+    if (!email) {
+      response.status(400).json({ error: 'Missing email' });
+      return;
+    }
+    if (!password) {
+      response.status(400).json({ error: 'Missing password' });
+      return;
+    }
 
-    const userPassword = request.body.password;
-    if (!userPassword)
-      return response.status(400).send({ error: 'Missing password' });
-
-    const oldUserEmail = await DBClient.db
-      .collection('users')
-      .findOne({ email: userEmail });
-    if (oldUserEmail)
-      return response.status(400).send({ error: 'Already exist' });
-
-    const shaUserPassword = sha1(userPassword);
-    const result = await DBClient.db
-      .collection('users')
-      .insertOne({ email: userEmail, password: shaUserPassword });
-
-    userQueue.add({
-      userId: result.insertedId,
+    const users = dbClient.db.collection('users');
+    users.findOne({ email }, (err, user) => {
+      if (user) {
+        response.status(400).json({ error: 'Already exist' });
+      } else {
+        const hashedPassword = sha1(password);
+        users.insertOne(
+          {
+            email,
+            password: hashedPassword,
+          },
+        ).then((result) => {
+          response.status(201).json({ id: result.insertedId, email });
+          userQueue.add({ userId: result.insertedId });
+        }).catch((error) => console.log(error));
+      }
     });
-
-    return response
-      .status(201)
-      .send({ id: result.insertedId, email: userEmail });
   }
 
-  static async getMe(req, res) {
-    const token = req.header('X-Token') || null;
-    if (!token) return res.status(401).send({ error: 'Unauthorized' });
-
-    const redisToken = await RedisClient.get(`auth_${token}`);
-    if (!redisToken) return res.status(401).send({ error: 'Unauthorized' });
-
-    const user = await DBClient.db
-      .collection('users')
-      .findOne({ _id: ObjectId(redisToken) });
-
-    if (!user) return res.status(401).send({ error: 'Unauthorized' });
-
-    return res.status(200).send({ id: user._id, email: user.email });
+  static async getMe(request, response) {
+    const token = request.header('X-Token');
+    const key = `auth_${token}`;
+    const userId = await redisClient.get(key);
+    if (userId) {
+      const users = dbClient.db.collection('users');
+      const idObject = new ObjectID(userId);
+      users.findOne({ _id: idObject }, (err, user) => {
+        if (user) {
+          response.status(200).json({ id: userId, email: user.email });
+        } else {
+          response.status(401).json({ error: 'Unauthorized' });
+        }
+      });
+    } else {
+      console.log('Hupatikani!');
+      response.status(401).json({ error: 'Unauthorized' });
+    }
   }
 }
 

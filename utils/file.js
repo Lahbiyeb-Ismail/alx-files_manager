@@ -1,3 +1,4 @@
+
 import { ObjectId } from 'mongodb';
 import { v4 as uuidv4 } from 'uuid';
 import { promises as fsPromises } from 'fs';
@@ -15,7 +16,9 @@ const fileUtils = {
    * @return {object} object with err and validated params
    */
   async validateBody(request) {
-    const { name, type, isPublic = false, data } = request.body;
+    const {
+      name, type, isPublic = false, data,
+    } = request.body;
 
     let { parentId = 0 } = request.body;
 
@@ -91,7 +94,9 @@ const fileUtils = {
    * @return {obj} object with error if present and file
    */
   async saveFile(userId, fileParams, FOLDER_PATH) {
-    const { name, type, isPublic, data } = fileParams;
+    const {
+      name, type, isPublic, data,
+    } = fileParams;
     let { parentId } = fileParams;
 
     if (parentId !== 0) parentId = ObjectId(parentId);
@@ -144,7 +149,7 @@ const fileUtils = {
     const fileList = await dbClient.filesCollection.findOneAndUpdate(
       query,
       set,
-      { returnOriginal: false }
+      { returnOriginal: false },
     );
     return fileList;
   },
@@ -158,15 +163,11 @@ const fileUtils = {
   async publishUnpublish(request, setPublish) {
     const { id: fileId } = request.params;
 
-    if (!basicUtils.isValidId(fileId)) {
-      return { error: 'Unauthorized', code: 401 };
-    }
+    if (!basicUtils.isValidId(fileId)) { return { error: 'Unauthorized', code: 401 }; }
 
     const { userId } = await userUtils.getUserIdAndKey(request);
 
-    if (!basicUtils.isValidId(userId)) {
-      return { error: 'Unauthorized', code: 401 };
-    }
+    if (!basicUtils.isValidId(userId)) { return { error: 'Unauthorized', code: 401 }; }
 
     const user = await userUtils.getUser({
       _id: ObjectId(userId),
@@ -186,7 +187,7 @@ const fileUtils = {
         _id: ObjectId(fileId),
         userId: ObjectId(userId),
       },
-      { $set: { isPublic: setPublish } }
+      { $set: { isPublic: setPublish } },
     );
 
     const {
@@ -235,11 +236,9 @@ const fileUtils = {
    */
   isOwnerAndPublic(file, userId) {
     if (
-      (!file.isPublic && !userId) ||
-      (userId && file.userId.toString() !== userId && !file.isPublic)
-    ) {
-      return false;
-    }
+      (!file.isPublic && !userId)
+      || (userId && file.userId.toString() !== userId && !file.isPublic)
+    ) { return false; }
 
     return true;
   },
@@ -268,3 +267,4 @@ const fileUtils = {
 };
 
 export default fileUtils;
+
