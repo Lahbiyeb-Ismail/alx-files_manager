@@ -1,73 +1,49 @@
 import Queue from 'bull';
 import { ObjectId } from 'mongodb';
-import { promises as fsPromises } from 'fs';
-import fileUtils from './utils/file';
-import userUtils from './utils/user';
-import basicUtils from './utils/basic';
-
-const imageThumbnail = require('image-thumbnail');
+import fs from 'fs';
+import imageThumb from 'image-thumbnail';
+import dbClient from './utils/db';
 
 const fileQueue = new Queue('fileQueue');
 const userQueue = new Queue('userQueue');
 
 fileQueue.process(async (job) => {
-  const { fileId, userId } = job.data;
+  try {
+    const { fileId, userId } = job.data;
 
-  // Delete bull keys in redis
-  //   redis-cli keys "bull*" | xargs redis-cli del
-
-  if (!userId) {
-    console.log('Missing userId');
-    throw new Error('Missing userId');
-  }
-
-  if (!fileId) {
-    console.log('Missing fileId');
-    throw new Error('Missing fileId');
-  }
-
-  if (!basicUtils.isValidId(fileId) || !basicUtils.isValidId(userId)) throw new Error('File not found');
-
-  const file = await fileUtils.getFile({
-    _id: ObjectId(fileId),
-    userId: ObjectId(userId),
-  });
-
-  if (!file) throw new Error('File not found');
-
-  const { localPath } = file;
-  const options = {};
-  const widths = [500, 250, 100];
-
-  widths.forEach(async (width) => {
-    options.width = width;
-    try {
-      const thumbnail = await imageThumbnail(localPath, options);
-      await fsPromises.writeFile(`${localPath}_${width}`, thumbnail);
-      //   console.log(thumbnail);
-    } catch (err) {
-      console.error(err.message);
+    if (!fileId) {
+      throw new Error('Missing fileId');
     }
-  });
+    if (!userId) {
+      throw new Error('Missing userId');
+    }
+    const file = await dbClient.dbClient.collection('files').findOne({ _id: ObjectId(fileId), userId: ObjectId(userId) });
+    if (!file) {
+      throw new Error('File not found');
+    }
+    const dir = file.localPath;
+    fs.writeFileSync(`${dir}_500`, await imageThumb(dir, { width: 500 }));
+    fs.writeFileSync(`${dir}_250`, await imageThumb(dir, { width: 250 }));
+    fs.writeFileSync(`${dir}_100`, await imageThumb(dir, { width: 100 }));
+  } catch (err) {
+    console.error(err);
+  }
 });
 
 userQueue.process(async (job) => {
-  const { userId } = job.data;
-  // Delete bull keys in redis
-  //   redis-cli keys "bull*" | xargs redis-cli del
-
-  if (!userId) {
-    console.log('Missing userId');
-    throw new Error('Missing userId');
+  try {
+    const { userId } = job.data;
+    if (!userId) {
+      throw new Error('Missing userId');
+    }
+    const user = await dbClient.dbClient.collection('users').findOne({ _id: ObjectId(userId) });
+    if (!user) {
+      throw new Error('User not found');
+    }
+    console.log(`Welcome ${user.email}!`);
+  } catch (err) {
+    console.error('cannot send email');
   }
-
-  if (!basicUtils.isValidId(userId)) throw new Error('User not found');
-
-  const user = await userUtils.getUser({
-    _id: ObjectId(userId),
-  });
-
-  if (!user) throw new Error('User not found');
-
-  console.log(`Welcome ${user.email}!`);
 });
+
+export { fileQueue, userQueue };
